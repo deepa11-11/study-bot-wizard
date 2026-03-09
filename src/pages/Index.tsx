@@ -127,7 +127,7 @@ const Index = () => {
 
         <footer className="mt-20 pb-8 text-center">
           <p className="text-muted-foreground text-sm">
-            AI-Powered YouTube Learning Assistant
+            AI-Powered YouTube Learning Assistant — Built with Lovable
           </p>
         </footer>
       </div>
