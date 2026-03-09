@@ -133,14 +133,29 @@ serve(async (req) => {
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
     if (!LOVABLE_API_KEY) throw new Error("LOVABLE_API_KEY is not configured");
 
-    // Fetch real transcript from YouTube
+    // Try to fetch real transcript from YouTube
     console.log("Fetching transcript for video:", videoId);
-    const transcript = await fetchYouTubeTranscript(videoId);
-    console.log("Transcript fetched, length:", transcript.length);
+    let transcript: string | null = null;
+    let hasRealTranscript = false;
+    try {
+      transcript = await fetchYouTubeTranscript(videoId);
+      hasRealTranscript = true;
+      console.log("Real transcript fetched, length:", transcript.length);
+    } catch (e) {
+      console.log("Could not fetch transcript, will use AI generation:", e instanceof Error ? e.message : e);
+    }
 
-    const systemPrompt = `You are an AI educational content analyzer. You are given a real transcript from a YouTube video. Analyze it and generate comprehensive learning materials. You must respond using the provided tool/function.
+    const systemPrompt = hasRealTranscript
+      ? `You are an AI educational content analyzer. You are given a real transcript from a YouTube video. Analyze it and generate comprehensive learning materials. You must respond using the provided tool/function.
 
-Based on the transcript below, generate:
+Based on the transcript below, generate:`
+      : `You are an AI educational content analyzer. Given a YouTube video URL, generate comprehensive learning materials. You must respond using the provided tool/function.
+
+The video URL is: ${videoUrl}
+The video ID is: ${videoId}
+
+Based on your knowledge of this video (or if you don't know it, create plausible educational content), generate:
+1. A realistic transcript (~500 words) with timestamp markers like [0:00], [1:30], etc.`;
 1. A concise summary (2-3 paragraphs)
 2. 4-6 key concepts
 3. 3-5 important highlights (direct quotes or key points from the transcript)
