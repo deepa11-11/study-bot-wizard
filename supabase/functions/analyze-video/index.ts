@@ -16,10 +16,8 @@ async function fetchYouTubeTranscript(videoId: string): Promise<string> {
   });
   const html = await watchResp.text();
 
-  // Extract captions data from the page
   const captionMatch = html.match(/"captions":\s*(\{.*?"playerCaptionsTracklistRenderer".*?\})\s*,\s*"videoDetails"/s);
   if (!captionMatch) {
-    // Try InnerTube API as fallback
     return await fetchViaInnerTube(videoId);
   }
 
@@ -32,43 +30,11 @@ async function fetchYouTubeTranscript(videoId: string): Promise<string> {
 
   const tracks = captionsData?.playerCaptionsTracklistRenderer?.captionTracks;
   if (!tracks || tracks.length === 0) {
-    throw new Error("No captions available for this video. The video must have subtitles/captions enabled.");
+    throw new Error("NO_CAPTIONS");
   }
 
-  // Prefer English, fall back to first available
   const enTrack = tracks.find((t: any) => t.languageCode === "en" || t.languageCode?.startsWith("en")) || tracks[0];
-  const captionUrl = enTrack.baseUrl;
-
-  // Step 2: Fetch the actual caption XML
-  const captionResp = await fetch(captionUrl);
-  const captionXml = await captionResp.text();
-
-  // Step 3: Parse XML to text with timestamps
-  const segments: string[] = [];
-  const regex = /<text start="([\d.]+)"[^>]*>([\s\S]*?)<\/text>/g;
-  let match;
-  while ((match = regex.exec(captionXml)) !== null) {
-    const startSec = parseFloat(match[1]);
-    const minutes = Math.floor(startSec / 60);
-    const seconds = Math.floor(startSec % 60);
-    const timestamp = `[${minutes}:${seconds.toString().padStart(2, "0")}]`;
-    const text = match[2]
-      .replace(/&amp;/g, "&")
-      .replace(/&lt;/g, "<")
-      .replace(/&gt;/g, ">")
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'")
-      .replace(/<[^>]+>/g, "")
-      .replace(/\n/g, " ")
-      .trim();
-    if (text) segments.push(`${timestamp} ${text}`);
-  }
-
-  if (segments.length === 0) {
-    throw new Error("Failed to parse captions from YouTube.");
-  }
-
-  return segments.join("\n");
+  return await fetchCaptionXml(enTrack.baseUrl);
 }
 
 async function fetchViaInnerTube(videoId: string): Promise<string> {
@@ -78,12 +44,7 @@ async function fetchViaInnerTube(videoId: string): Promise<string> {
     body: JSON.stringify({
       videoId,
       context: {
-        client: {
-          clientName: "ANDROID",
-          clientVersion: "17.31.35",
-          androidSdkVersion: 30,
-          hl: "en",
-        },
+        client: { clientName: "ANDROID", clientVersion: "17.31.35", androidSdkVersion: 30, hl: "en" },
       },
     }),
   });
@@ -91,11 +52,15 @@ async function fetchViaInnerTube(videoId: string): Promise<string> {
   const data = await resp.json();
   const tracks = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
   if (!tracks || tracks.length === 0) {
-    throw new Error("No captions available for this video. The video must have subtitles/captions enabled.");
+    throw new Error("NO_CAPTIONS");
   }
 
   const enTrack = tracks.find((t: any) => t.languageCode === "en" || t.languageCode?.startsWith("en")) || tracks[0];
-  const captionResp = await fetch(enTrack.baseUrl);
+  return await fetchCaptionXml(enTrack.baseUrl);
+}
+
+async function fetchCaptionXml(url: string): Promise<string> {
+  const captionResp = await fetch(url);
   const captionXml = await captionResp.text();
 
   const segments: string[] = [];
@@ -107,21 +72,13 @@ async function fetchViaInnerTube(videoId: string): Promise<string> {
     const seconds = Math.floor(startSec % 60);
     const timestamp = `[${minutes}:${seconds.toString().padStart(2, "0")}]`;
     const text = match[2]
-      .replace(/&amp;/g, "&")
-      .replace(/&lt;/g, "<")
-      .replace(/&gt;/g, ">")
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'")
-      .replace(/<[^>]+>/g, "")
-      .replace(/\n/g, " ")
-      .trim();
+      .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+      .replace(/<[^>]+>/g, "").replace(/\n/g, " ").trim();
     if (text) segments.push(`${timestamp} ${text}`);
   }
 
-  if (segments.length === 0) {
-    throw new Error("Failed to parse captions from YouTube.");
-  }
-
+  if (segments.length === 0) throw new Error("NO_CAPTIONS");
   return segments.join("\n");
 }
 
@@ -133,8 +90,7 @@ serve(async (req) => {
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
     if (!LOVABLE_API_KEY) throw new Error("LOVABLE_API_KEY is not configured");
 
-    // Try to fetch real transcript from YouTube
-    console.log("Fetching transcript for video:", videoId);
+    // Try fetching real transcript
     let transcript: string | null = null;
     let hasRealTranscript = false;
     try {
@@ -142,29 +98,57 @@ serve(async (req) => {
       hasRealTranscript = true;
       console.log("Real transcript fetched, length:", transcript.length);
     } catch (e) {
-      console.log("Could not fetch transcript, will use AI generation:", e instanceof Error ? e.message : e);
+      console.log("No captions available, falling back to AI generation");
     }
 
-    const systemPrompt = hasRealTranscript
-      ? `You are an AI educational content analyzer. You are given a real transcript from a YouTube video. Analyze it and generate comprehensive learning materials. You must respond using the provided tool/function.
+    const commonInstructions = `
+1. A concise summary (2-3 paragraphs)
+2. 4-6 key concepts
+3. 3-5 important highlights
+4. 4-6 structured notes with titles and content
+5. Difficulty level classification (Beginner/Intermediate/Advanced)
+6. 5-8 multiple choice questions with 4 options each
+7. 3-5 detected topics with explanations
 
-Based on the transcript below, generate:`
-      : `You are an AI educational content analyzer. Given a YouTube video URL, generate comprehensive learning materials. You must respond using the provided tool/function.
+Make everything educational, accurate, and useful for students.`;
+
+    let systemPrompt: string;
+    let userMessage: string;
+
+    if (hasRealTranscript) {
+      systemPrompt = `You are an AI educational content analyzer. You are given a real transcript from a YouTube video. Analyze it and generate comprehensive learning materials using the provided tool/function. Generate:${commonInstructions}`;
+      userMessage = `Here is the real transcript:\n\n${transcript}\n\nAnalyze this transcript and generate learning materials.`;
+    } else {
+      systemPrompt = `You are an AI educational content analyzer. Given a YouTube video URL, generate comprehensive learning materials using the provided tool/function.
 
 The video URL is: ${videoUrl}
 The video ID is: ${videoId}
 
-Based on your knowledge of this video (or if you don't know it, create plausible educational content), generate:
-1. A realistic transcript (~500 words) with timestamp markers like [0:00], [1:30], etc.`;
-1. A concise summary (2-3 paragraphs)
-2. 4-6 key concepts
-3. 3-5 important highlights (direct quotes or key points from the transcript)
-4. 4-6 structured notes with titles and content
-5. Difficulty level classification (Beginner/Intermediate/Advanced)
-6. 5-8 multiple choice questions with 4 options each based on the actual content
-7. 3-5 detected topics with explanations
+Generate:
+1. A realistic transcript (~500 words) with timestamp markers like [0:00], [1:30], etc.${commonInstructions}`;
+      userMessage = `Analyze this YouTube video: ${videoUrl}`;
+    }
 
-Make everything accurate to the actual transcript content.`;
+    const toolParams: any = {
+      type: "object",
+      properties: {
+        summary: { type: "string" },
+        keyConcepts: { type: "array", items: { type: "string" } },
+        highlights: { type: "array", items: { type: "string" } },
+        notes: { type: "array", items: { type: "object", properties: { title: { type: "string" }, content: { type: "string" } }, required: ["title", "content"] } },
+        difficulty: { type: "string", enum: ["Beginner", "Intermediate", "Advanced"] },
+        mcqs: { type: "array", items: { type: "object", properties: { question: { type: "string" }, options: { type: "array", items: { type: "string" } }, correctIndex: { type: "integer" } }, required: ["question", "options", "correctIndex"] } },
+        topics: { type: "array", items: { type: "object", properties: { title: { type: "string" }, content: { type: "string" } }, required: ["title", "content"] } },
+      },
+      required: ["summary", "keyConcepts", "highlights", "notes", "difficulty", "mcqs", "topics"],
+      additionalProperties: false,
+    };
+
+    // If no real transcript, ask AI to also generate one
+    if (!hasRealTranscript) {
+      toolParams.properties.transcript = { type: "string", description: "Full transcript with timestamps" };
+      toolParams.required.push("transcript");
+    }
 
     const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
       method: "POST",
@@ -176,72 +160,16 @@ Make everything accurate to the actual transcript content.`;
         model: "google/gemini-2.5-flash",
         messages: [
           { role: "system", content: systemPrompt },
-          { role: "user", content: `Here is the transcript:\n\n${transcript}\n\nAnalyze this transcript and generate learning materials.` },
+          { role: "user", content: userMessage },
         ],
-        tools: [
-          {
-            type: "function",
-            function: {
-              name: "return_analysis",
-              description: "Return the complete video analysis",
-              parameters: {
-                type: "object",
-                properties: {
-                  summary: { type: "string", description: "Concise summary" },
-                  keyConcepts: { type: "array", items: { type: "string" }, description: "Key concepts" },
-                  highlights: { type: "array", items: { type: "string" }, description: "Important highlights" },
-                  notes: {
-                    type: "array",
-                    items: {
-                      type: "object",
-                      properties: {
-                        title: { type: "string" },
-                        content: { type: "string" },
-                      },
-                      required: ["title", "content"],
-                    },
-                  },
-                  difficulty: { type: "string", enum: ["Beginner", "Intermediate", "Advanced"] },
-                  mcqs: {
-                    type: "array",
-                    items: {
-                      type: "object",
-                      properties: {
-                        question: { type: "string" },
-                        options: { type: "array", items: { type: "string" } },
-                        correctIndex: { type: "integer" },
-                      },
-                      required: ["question", "options", "correctIndex"],
-                    },
-                  },
-                  topics: {
-                    type: "array",
-                    items: {
-                      type: "object",
-                      properties: {
-                        title: { type: "string" },
-                        content: { type: "string" },
-                      },
-                      required: ["title", "content"],
-                    },
-                  },
-                },
-                required: ["summary", "keyConcepts", "highlights", "notes", "difficulty", "mcqs", "topics"],
-                additionalProperties: false,
-              },
-            },
-          },
-        ],
+        tools: [{ type: "function", function: { name: "return_analysis", description: "Return the complete video analysis", parameters: toolParams } }],
         tool_choice: { type: "function", function: { name: "return_analysis" } },
       }),
     });
 
     if (!response.ok) {
       if (response.status === 429) {
-        return new Response(JSON.stringify({ error: "Rate limit exceeded. Please try again later." }), {
-          status: 429,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
+        return new Response(JSON.stringify({ error: "Rate limit exceeded. Please try again later." }), { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } });
       }
       const t = await response.text();
       console.error("AI gateway error:", response.status, t);
@@ -253,8 +181,10 @@ Make everything accurate to the actual transcript content.`;
     if (!toolCall) throw new Error("No analysis returned from AI");
 
     const result = JSON.parse(toolCall.function.arguments);
-    // Include the real transcript in the result
-    result.transcript = transcript;
+    // Use real transcript if available
+    if (hasRealTranscript) {
+      result.transcript = transcript;
+    }
 
     return new Response(JSON.stringify(result), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
